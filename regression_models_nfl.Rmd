@@ -1,0 +1,230 @@
+library(nflfastR)
+library(tidyverse)
+
+install.packages("vip")
+library(vip)
+library(ggimage)
+
+```{r}
+#Load in play by play data
+pbp <- load_pbp(2023)
+```
+
+```{r}
+#Filter our data down to 4th downs and remove na values
+fourth_downs <- pbp %>% 
+  filter(down == 4, !is.na(play_type))
+```
+
+```{r}
+#Group by play type on 4th down to look at run & pass plays
+fourth_downs %>% 
+  group_by(play_type) %>% 
+  tally(sort = T)
+```
+
+```{r}
+#Add new column that assigns values to plays when teams went for it
+
+fourth_downs <- fourth_downs %>% 
+  mutate(went_for_it = ifelse(play_type %in% c("pass", "run"), 1, 0))
+```
+
+```{r}
+#See the rate at teams went for it on certain yards to go situations
+
+fourth_downs %>% 
+  group_by(ydstogo) %>% 
+  summarize(count = n(),
+            went_for_it_rate = mean(went_for_it)) %>% 
+  filter(count >= 5) %>% 
+  ggplot(aes(x = ydstogo, y = went_for_it_rate))+
+  geom_bar(aes(fill = went_for_it_rate), stat = "identity")+
+  theme_minimal() +
+  labs(x = "Yards to Go",
+       y = "Went For It Rate",
+       title = "Went For It Rate by Yards to Go")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+```{r}
+#Look at went for it rate by yardline
+
+fourth_downs %>% 
+  group_by(yardline_100) %>% 
+  summarize(count = n(),
+            went_for_it_rate = mean(went_for_it)) %>% 
+  filter(count >= 5) %>% 
+  ggplot(aes(x = yardline_100, y = went_for_it_rate))+
+  geom_bar(aes(fill = went_for_it_rate), stat ="identity")+
+  theme_minimal()+
+  labs(x = "Yardline",
+       y = "Went for It Rate")
+            
+```
+
+```{r}
+#Create logistic regression model
+#Use variables that would have an impact on decision
+
+log_fourth <- glm(went_for_it ~ ydstogo + yardline_100 + wp,
+                  data = fourth_downs)
+```
+
+
+```{r}
+#As ydstogo increases, probability to go for it decreases
+#As yardline increases, probability to go for decreases a very small amount
+#As win probability increases, probability to go for it decreases
+log_fourth
+
+```
+```{r}
+summary(log_fourth)
+```
+
+```{r}
+#Look at what variables are the most important
+
+vip(log_fourth)
+```
+
+```{r}
+#Fit a logistic regression model with main effects and two-way interaction terms
+
+log_fourth_co <- glm(went_for_it ~ (yardline_100+ ydstogo+wp)^2,
+                     data = fourth_downs)
+```
+
+```{r}
+summary(log_fourth_co)
+```
+
+```{r}
+#Visualize the predicted probability of going for it based on yards to go
+
+fourth_downs %>% 
+  mutate(pred_prob = log_fourth$fitted.values) %>% 
+  ggplot(aes(x=ydstogo))+
+  geom_smooth(aes(y=pred_prob), color="black", size = 2)+
+  geom_point(aes(y = went_for_it, color = ifelse(went_for_it == 1, "darkgreen", "darkred")),
+             alpha = 0.8) +
+  scale_color_identity()+
+  theme_minimal()+
+  labs(x = "Yards to Go",
+       y = "Chance go for it")
+```
+
+```{r}
+#Calculate the difference between actual and predicted probabilities of going for it
+
+fourth_downs <- fourth_downs %>% 
+  mutate(pred_prob = log_fourth$fitted.values) %>% 
+  mutate(fourth_oe = went_for_it - pred_prob)
+```
+
+
+```{r}
+#Summarize and visualize actual vs expected 4th down decisions by team for 2023
+team_fourth_23 <- fourth_downs %>% 
+  filter(season == 2023) %>% 
+  group_by(posteam) %>% 
+  summarize(count = n(),
+            exp_fourths= sum(pred_prob),
+            actual_fourths = sum(went_for_it),
+            fourth_oe = sum(fourth_oe)) %>% 
+  left_join(teams_colors_logos, by= c("posteam" = "team_abbr"))
+```
+
+```{r}
+#Plot actual vs expected 4th down go decisions with team logos
+team_fourth_23 %>% 
+  ggplot(aes(x = exp_fourths, y= actual_fourths))+
+  geom_hline(yintercept = mean(team_fourth_23$actual_fourths), linetype = "dashed")+
+  geom_vline(xintercept = mean(team_fourth_23$exp_fourths), linetype = "dashed")+
+  geom_smooth(method = "lm", color = "black", size = 1.5, alpha = 0.5, se = FALSE)+
+  geom_image(aes(image = team_logo_espn), asp = 16/9, size = 0.05)+
+  theme_bw()+
+  labs(x = "Expected 4th Down Go's",
+       y = "Actual 4th Down Go's",
+       title = "Actual vs Expected 4th Down Go's in 2023",
+       subtitle ="based on a logistic regression model")+
+  scale_x_continuous(breaks= scales::pretty_breaks(n=8))+
+  scale_y_continuous(breaks= scales::pretty_breaks(n=8))+
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 20))+
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+ggsave('fourth_down1.png', width = 14, height = 10, dpi= "retina") 
+```
+
+```{r}
+#Filter data to include only passing plays with complete information
+pass_plays <- pbp %>% 
+  filter(pass == 1) %>% 
+  filter(!is.na(air_yards), !is.na(down), !is.na(wp), !is.na(ydstogo), !is.na(half_seconds_remaining))
+
+
+
+#Select and prepare variables for a linear model predicting air yards
+pass_play_model <- pass_plays %>% 
+  select(air_yards, down, wp, ydstogo, half_seconds_remaining, season) %>% 
+  mutate(down = as.factor(down))  # Convert down to a factor variable
+
+
+
+#View the structure and check for missing values in the model dataset
+str(pass_play_model)
+colSums(is.na(pass_play_model))
+```
+
+```{r}
+#Fit a linear regression model to predict air yards
+air_yards_lm <- lm(air_yards ~ down + wp + ydstogo + half_seconds_remaining + 
+                     as.factor(season), data = pass_play_model)
+```
+
+
+```{r}
+summary(air_yards_lm)
+```
+
+```{r}
+#Visualize variable importance in the air yards linear model
+vip(air_yards_lm)
+```
+
+```{r}
+#Generate predictions for expected air yards using the linear model
+air_yards_preds <- data.frame(predict.lm(air_yards_lm, newdata = pass_play_model)) %>% 
+  rename(exp_air_yards = predict.lm.air_yards_lm..newdata...pass_play_model.)
+```
+
+
+```{r}
+#Combine predictions with the original passing plays dataset
+air_yards_projs <- cbind(pass_plays, air_yards_preds)
+```
+
+
+```{r}
+#Calculate and summarize air yards over expectation (AYOE) for quarterbacks with at least 100 passes in 2023
+air_yards_proj_2023 <- air_yards_projs %>% 
+  mutate(ayoe = air_yards - exp_air_yards) %>% 
+  filter(season == 2023) %>% 
+  group_by(passer) %>% 
+  summarize(passes = n(),
+            exp_air_yards = mean(exp_air_yards),
+            adot = mean(air_yards),
+            avg_air_yards = mean(ayoe)) %>% 
+  filter(passes >= 100)
+```
+
+
+
+
+
+
+
+
